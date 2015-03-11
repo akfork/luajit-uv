@@ -36,6 +36,7 @@ void uvStopTimer(void *handle);
 
 void uvRead(void *handle, void *bytes);
 
+void *uvConnect(void *handle, const char *host, const char *port);
 void *uvListen6(void *handle, const char *ip, int port, int backlog);
 void *uvTcpNew();
 

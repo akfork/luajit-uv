@@ -19,7 +19,7 @@ typedef struct {
 static uint32_t _bytesId;
 
 void *bytesNew(int len) {
-	bytes *b = malloc(sizeof(bytes));
+	bytes *b = calloc(sizeof(bytes), 1);
 	b->len = len;
 	b->id = _bytesId++;
 	strbuf_init(&b->sb, len);
@@ -120,6 +120,8 @@ typedef struct {
 	bytes *readBytes;
 	int readLen;
 	int readPos;
+	uv_connect_t *connReq;
+	uv_getaddrinfo_t *resolveReq;
 } uvHandleHdr;
 
 typedef struct {
@@ -137,11 +139,10 @@ static void *uvGetHandle(uvHandleHdr *h) {
 }
 
 void *uvNewHandle(int size) {
-	uvHandleHdr *h = malloc(sizeof(uvHandleHdr) + size);
+	uvHandleHdr *h = calloc(sizeof(uvHandleHdr) + size, 1);
 	void *handle = h + 1;
 	static uint32_t id;
 
-	memset(h, 0, sizeof(uvHandleHdr) + size);
 	queue_init(&h->q);
 	h->refNr = 1;
 	h->id = id++;
@@ -151,6 +152,10 @@ void *uvNewHandle(int size) {
 
 static void uvFreeHandle(void *handle) {
 	uvHandleHdr *h = uvGetHdr(handle);
+	if (h->connReq)
+		free(h->connReq);
+	if (h->resolveReq)
+		free(h->resolveReq);
 	free(h);
 }
 
@@ -181,7 +186,6 @@ static void uvMarkEventHappened(void *handle, int type, uvEventArg *args, int ar
 	}
 
 	h->emask |= 1<<type;
-	//printf("mark event=%d\n", type);
 }
 
 #define MAX_READLEN 2048
@@ -278,7 +282,7 @@ void uvMarkKeep(void *handle) {
 
 static void onWalkGc(uv_handle_t *handle, void *data) {
 	uvHandleHdr *h = uvGetHdr(handle);
-	if (!(h->marks & UV_M_KEEP))
+	if (!(h->marks & UV_M_KEEP) && !uv_is_closing(handle))
 		uvCloseHandle(handle);
 }
 
@@ -317,9 +321,10 @@ static int pollFromEventCache(uvEvent *e) {
 int uvPollLoop(uvEvent *e) {
 	if (pollFromEventCache(e))
 		return 1;
-	if (uv_run(curLoop, UV_RUN_ONCE) == 0)
-		return -1;
-	return 0;
+	int r = uv_run(curLoop, UV_RUN_ONCE);
+	if (pollFromEventCache(e))
+		return 1;
+	return r == 0 ? -1 : 0;
 }
 
 static void onTimer(uv_timer_t *handle) {
@@ -341,6 +346,49 @@ void *uvTcpNew() {
 	void *handle = uvNewHandle(sizeof(uv_tcp_t));
 	uv_tcp_init(curLoop, handle);
 	return handle;
+}
+
+static void onConnected(uv_connect_t *req, int stat) {
+	void *handle = req->handle;
+	uvEventArg args[] = {
+		{},
+		{.i = stat},
+	};
+	uvMarkEventHappened(handle, UV_E_CONNECT, args, 2);
+	//printf("connected h=%p s=%d\n", handle, stat);
+}
+
+static void onGotAddrInfo(uv_getaddrinfo_t *req, int stat, struct addrinfo *resp) {
+	struct addrinfo *rp;
+	void *handle = req->data;
+
+	for (rp = resp; rp; rp = rp->ai_next) {
+		if (rp->ai_family == AF_INET)
+			break;
+	}
+
+	if (rp == NULL) {
+		uvEventArg args[] = {
+			{},
+			{.i = -1},
+		};
+		uvMarkEventHappened(handle, UV_E_CONNECT, args, 2);
+	} else {
+		uvHandleHdr *h = uvGetHdr(handle);
+		h->connReq = calloc(sizeof(uv_connect_t), 1);
+		uv_tcp_connect(h->connReq, handle, rp->ai_addr, onConnected);
+	}
+
+	uv_freeaddrinfo(resp);
+}
+
+void *uvConnect(void *handle, const char *host, const char *port) {
+	//struct sockaddr_in addr;
+	//uv_ip4_addr(host, port, &addr);
+	uvHandleHdr *h = uvGetHdr(handle);
+	h->resolveReq = calloc(sizeof(uv_getaddrinfo_t), 1);
+	h->resolveReq->data = handle;
+	uv_getaddrinfo(curLoop, h->resolveReq, onGotAddrInfo, host, port, NULL);
 }
 
 static void onAccept(uv_stream_t *handle, int status) {

@@ -100,6 +100,18 @@ uv.setTimer = function (timeout, repeat_, cb)
 	return handle
 end
 
+uv.connect = function (host, port, cb)
+	local handle = uv._newHandle(ffi.C.uvTcpNew())
+
+	uv.addToProcessing(handle)
+	handle.connectCb = function (p, stat)
+		uv.removeFromProcessing(handle)
+		cb(handle, stat)
+	end
+
+	ffi.C.uvConnect(handle._handle, host, tostring(port))
+end
+
 uv.listen6 = function (host, port, backlog, cb)
 	local handle = uv._newHandle(ffi.C.uvTcpNew())
 	ffi.C.uvListen6(handle._handle, host, port, backlog)
